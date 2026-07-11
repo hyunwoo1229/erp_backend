@@ -171,9 +171,3 @@ stateDiagram-v2
 | POST | `/api/sales-orders/{id}/confirm` | 수주 확정 (재고 출고) |
 
 ---
-
-## 향후 계획
-
-- 직접 구축한 k3s 멀티노드 클러스터의 `erp` namespace에 배포하고, NetworkPolicy로 격리한 뒤 내부망(Tailscale) 전용으로 운영
-- Grafana 기반 리소스 측정과 requests/limits 튜닝을 통한 클라우드 최적화
-- 감사 로그(audit trail)로 승인·확정 이력 추적
