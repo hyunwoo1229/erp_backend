@@ -1,0 +1,174 @@
+name: Deploy to k3s
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: hyunwoo1229/erp-backend
+  K8S_NAMESPACE: erp
+  K8S_DEPLOYMENT: erp-backend
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build with Gradle
+        run: ./gradlew clean build -x test
+
+      - name: Generate Dockerfile
+        run: |
+          cat > Dockerfile <<'EOF'
+          FROM eclipse-temurin:17-jre-jammy
+          WORKDIR /app
+          COPY build/libs/*.jar app.jar
+          EXPOSE 8080
+          ENTRYPOINT ["java", "-jar", "/app/app.jar"]
+          EOF
+          rm -f build/libs/*-plain.jar
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set image tag
+        id: tag
+        run: echo "sha=$(echo ${GITHUB_SHA} | cut -c1-7)" >> $GITHUB_OUTPUT
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+
+      - name: Setup kubeconfig
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+
+      - name: Sync secrets to k3s
+        run: |
+          kubectl create namespace ${{ env.K8S_NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create secret generic erp-env -n ${{ env.K8S_NAMESPACE }} \
+            --from-literal=SPRING_DATASOURCE_URL='${{ secrets.ERP_DATASOURCE_URL }}' \
+            --from-literal=SPRING_DATASOURCE_USERNAME='${{ secrets.ERP_DATASOURCE_USERNAME }}' \
+            --from-literal=SPRING_DATASOURCE_PASSWORD='${{ secrets.ERP_DATASOURCE_PASSWORD }}' \
+            --from-literal=JWT_SECRET='${{ secrets.ERP_JWT_SECRET }}' \
+            --from-literal=JWT_EXPIRATION_MS='3600000' \
+            --from-literal=SERVER_PORT='8080' \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Apply k3s manifests
+        run: |
+          cat <<EOF | kubectl apply -f -
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: erp-backend
+            namespace: erp
+          spec:
+            replicas: 1
+            strategy:
+              type: Recreate
+            selector:
+              matchLabels:
+                app: erp-backend
+            template:
+              metadata:
+                labels:
+                  app: erp-backend
+              spec:
+                nodeSelector:
+                  workload: home
+                containers:
+                  - name: backend
+                    image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.sha }}
+                    imagePullPolicy: IfNotPresent
+                    ports:
+                      - name: http
+                        containerPort: 8080
+                    envFrom:
+                      - secretRef:
+                          name: erp-env
+                    resources:
+                      requests:
+                        memory: "512Mi"
+                        cpu: "200m"
+                      limits:
+                        memory: "1Gi"
+                        cpu: "1000m"
+                    startupProbe:
+                      tcpSocket:
+                        port: 8080
+                      initialDelaySeconds: 30
+                      periodSeconds: 10
+                      failureThreshold: 30
+                    livenessProbe:
+                      tcpSocket:
+                        port: 8080
+                      periodSeconds: 30
+                      failureThreshold: 3
+                    readinessProbe:
+                      tcpSocket:
+                        port: 8080
+                      periodSeconds: 10
+                      failureThreshold: 3
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: erp-backend
+            namespace: erp
+          spec:
+            selector:
+              app: erp-backend
+            ports:
+              - name: http
+                port: 8080
+                targetPort: 8080
+            type: ClusterIP
+          EOF
+
+      - name: Rollout deployment
+        run: |
+          kubectl rollout status deployment/${{ env.K8S_DEPLOYMENT }} \
+            -n ${{ env.K8S_NAMESPACE }} --timeout=300s
+
+      - name: Verify deployment
+        run: |
+          kubectl get pod -n ${{ env.K8S_NAMESPACE }} -l app=erp-backend
+          echo "Deployed image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.sha }}"
