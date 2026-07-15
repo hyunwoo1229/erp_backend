@@ -87,6 +87,7 @@ jobs:
             --from-literal=SPRING_DATASOURCE_URL='${{ secrets.ERP_DATASOURCE_URL }}' \
             --from-literal=SPRING_DATASOURCE_USERNAME='${{ secrets.ERP_DATASOURCE_USERNAME }}' \
             --from-literal=SPRING_DATASOURCE_PASSWORD='${{ secrets.ERP_DATASOURCE_PASSWORD }}' \
+            --from-literal=SPRING_JPA_HIBERNATE_DDL_AUTO='update' \
             --from-literal=JWT_SECRET='${{ secrets.ERP_JWT_SECRET }}' \
             --from-literal=JWT_EXPIRATION_MS='3600000' \
             --from-literal=SERVER_PORT='8080' \
