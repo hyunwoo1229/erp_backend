@@ -17,6 +17,8 @@
 | 인증 | JWT (jjwt), BCrypt |
 | 동시성 | JPA 낙관적 락(@Version) + spring-retry, 비관적 락(@Lock) |
 | Build | Gradle |
+| 배포 | Docker, GitHub Actions, k3s (쿠버네티스), GHCR |
+| 인프라 | OCI MySQL HeatWave, Tailscale, NetworkPolicy |
 
 ---
 
@@ -171,3 +173,25 @@ stateDiagram-v2
 | POST | `/api/sales-orders/{id}/confirm` | 수주 확정 (재고 출고) |
 
 ---
+
+## 배포 및 운영
+
+직접 구축해 운영 중인 k3s 멀티노드 클러스터에 배포했습니다. 외부에 공개된 다른 서비스들과 달리, 사내 시스템을 가정해 외부 노출 없이 내부망에서만 접근하도록 격리한 것이 특징입니다.
+
+```mermaid
+flowchart LR
+  DEV[GitHub main push] --> GHA[GitHub Actions]
+  GHA -->|이미지 빌드/푸시| GHCR[GHCR]
+  GHA -->|Tailscale 경유 배포| K3S[k3s: erp namespace]
+  GHCR --> K3S
+  K3S -->|내부망 접근| DB[(HeatWave: erp_prod)]
+```
+
+배포 파이프라인은 GitHub Actions로 자동화했습니다. main 브랜치에 push하면 JAR을 빌드해 Docker 이미지로 만들고, GHCR에 올린 뒤, Tailscale로 클러스터에 접속해 배포 이미지를 교체합니다.
+
+운영 구성에서 신경 쓴 점은 다음과 같습니다.
+
+- 내부 전용 노출: 서비스를 `ClusterIP`로 두어 외부에 노출하지 않고, 클러스터 접근도 Tailscale 내부망으로 제한했습니다. 도메인과 공개 인그레스를 붙인 외부 공개 서비스와 대비되는 구성입니다.
+- 네트워크 격리: `NetworkPolicy`(default-deny)로 `erp` namespace 바깥에서 오는 접근을 차단해, 같은 클러스터의 다른 서비스와 논리적으로 분리했습니다.
+- 운영 DB 분리: 로컬 개발 DB와 별개로, OCI MySQL HeatWave에 `erp_prod` 스키마를 두어 운영 데이터를 분리했습니다. 접속 정보와 비밀번호는 코드에 두지 않고 쿠버네티스 Secret으로 주입합니다.
+- 노드 지정과 리소스 관리: `nodeSelector`로 지정 노드에 배치하고, requests/limits로 자원 상한을 두었습니다. startup/liveness/readiness 프로브로 기동과 상태를 관리합니다.
